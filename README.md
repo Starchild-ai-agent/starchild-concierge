@@ -1,119 +1,92 @@
-# Starchild Concierge
+# Starchild Concierge API
 
-Knowledge base for the Starchild welcome agent.
+Knowledge-base chatbot powered by your GitHub repo content, with session memory stored in PostgreSQL.
 
-## Purpose
+## Features
 
-This repository contains the knowledge base used by Starchild's concierge agent — the AI assistant that greets new users and answers questions before they create their first agent.
+- **GitHub-synced knowledge** — auto-fetches `.md` files from your repo as the knowledge base
+- **Session memory** — multi-turn conversations persisted in PostgreSQL
+- **30-turn limit** per session (configurable)
+- **LLM via OpenRouter** — defaults to `google/gemini-3.1-flash-lite-preview`
+- **Streaming support** — SSE streaming responses
 
-## Files
-
-- **`welcome-knowledge-v2.md`** — Main knowledge base (the concierge reads this)
-- **`api.py`** — FastAPI chatbot API that turns this repo into a callable endpoint
-- **`changelog.md`** — Version history
-
-## Usage
-
-The concierge agent loads `welcome-knowledge-v2.md` as its primary knowledge source. Updates to this file are reflected automatically (TTL: 5 minutes, or call `/knowledge/refresh`).
-
----
-
-## Running the API
-
-### 1. Set environment variables
-
-Copy `.env.example` to `.env` and fill in:
-
-```env
-GITHUB_TOKEN=your_github_pat
-OPENAI_API_KEY=your_openai_key
-
-# Optional overrides
-# MODEL=gpt-4o
-# OPENAI_BASE_URL=https://api.openai.com/v1
-# KNOWLEDGE_TTL=300
-```
-
-### 2. Install & run
+## Quick Start
 
 ```bash
+# 1. Install
 pip install -r requirements.txt
+
+# 2. Configure .env
+cp .env.example .env
+# Fill in: GITHUB_TOKEN, OPENROUTER_API_KEY, DATABASE_URL
+
+# 3. Run
 python api.py
 ```
 
-API is now at `http://localhost:8000`
+## API
 
-### 3. Call the API
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Chat (non-streaming)
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {"role": "user", "content": "What is Starchild?"}
-    ]
-  }'
-
-# Chat (streaming)
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {"role": "user", "content": "How does pricing work?"}
-    ],
-    "stream": true
-  }'
-
-# Force-refresh knowledge from GitHub
-curl http://localhost:8000/knowledge/refresh
-```
-
-### 4. Deploy (one command)
+### `POST /chat`
 
 ```bash
-# Railway
-railway up
+# New session (auto-creates)
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is Starchild?"}'
 
-# Render — connect the repo in the Render dashboard, set env vars, done.
+# Continue existing session
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Tell me more", "session_id": "abc-123"}'
+
+# Streaming
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is Starchild?", "stream": true}'
 ```
 
----
+**Response:**
+```json
+{
+  "reply": "Starchild is...",
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "turn": 1,
+  "turns_remaining": 29,
+  "model": "google/gemini-3.1-flash-lite-preview"
+}
+```
 
-## How knowledge updates work
+When a session reaches the turn limit, the API returns `429` with a message to start a new session.
 
-1. Edit `welcome-knowledge-v2.md` in this repo
-2. Commit & push
-3. API auto-reloads within 5 minutes (configurable via `KNOWLEDGE_TTL`)
-4. Or call `GET /knowledge/refresh` to force an immediate reload
+### `GET /sessions/{session_id}`
 
-No redeploy needed for knowledge updates.
+Retrieve full session history and metadata.
 
----
+### `GET /knowledge/refresh`
+
+Force re-fetch knowledge files from GitHub.
+
+### `GET /health`
+
+Liveness check with knowledge and DB status.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GITHUB_TOKEN` | — | GitHub PAT (required for private repos) |
-| `OPENAI_API_KEY` | — | Your LLM API key |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
-| `MODEL` | `gpt-4o` | LLM model to use |
-| `GITHUB_OWNER` | `Starchild-ai-agent` | Repo owner |
-| `GITHUB_REPO` | `starchild-concierge` | Repo name |
-| `GITHUB_BRANCH` | `main` | Branch to read from |
-| `KNOWLEDGE_FILES` | `welcome-knowledge-v2.md` | Comma-separated files to load |
-| `KNOWLEDGE_TTL` | `300` | Seconds before re-fetching from GitHub |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENROUTER_API_KEY` | ✅ | — | OpenRouter API key |
+| `GITHUB_TOKEN` | ✅ | — | GitHub PAT for repo access |
+| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
+| `MODEL` | — | `google/gemini-3.1-flash-lite-preview` | LLM model |
+| `MAX_TURNS` | — | `30` | Max conversation turns per session |
+| `KNOWLEDGE_TTL` | — | `300` | Seconds before re-fetching knowledge |
+| `KNOWLEDGE_FILES` | — | `welcome-knowledge-v2.md` | Comma-separated knowledge files |
 
-## Tone
+## Database
 
-Calm, spacious, futuristic, all-knowing. Not a chatbot — a cosmic intelligence.
+The API auto-creates two tables on startup:
 
-## Maintained by
+- `sessions` — session metadata and turn counter
+- `messages` — full conversation history
 
-WOO / Starchild team
-
-Last updated: 2026-03-05
+No migration tool needed — schema is idempotent (`CREATE IF NOT EXISTS`).
