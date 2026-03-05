@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0] - 2026-03-05
+
+### Changed
+- **Security positioning**: Now emphasizes "more secure than running OpenClaw yourself"
+- Added to "How It Works": "We configure everything in a hardened environment"
+- Updated "Is my data safe?" answer to lead with security advantage over DIY
+- New misconception: "Running my own OpenClaw is more secure" → No.
+- Reinforced "easier, better, cheaper" throughout
+
 ## [2.0.0] - 2026-03-05
 
 ### Changed
