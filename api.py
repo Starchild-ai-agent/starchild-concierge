@@ -1,7 +1,7 @@
 """
 Starchild Concierge API
 -----------------------
-POST /chat              — send a message, get a response (session-based)
+POST /chat              — send a message, get a response (SSE stream by default)
 GET  /health            — liveness check
 GET  /knowledge/refresh — force-reload knowledge from GitHub
 GET  /sessions/{id}     — get session history
@@ -20,6 +20,7 @@ Environment variables (.env):
 """
 
 import os
+import json
 import time
 import uuid
 import base64
@@ -29,8 +30,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -152,7 +154,6 @@ async def close_db():
 async def get_or_create_session(session_id: Optional[str]) -> tuple[str, int]:
     """Returns (session_id, turn_count). Creates session if needed."""
     if not db_pool:
-        # No DB — return ephemeral session
         return session_id or str(uuid.uuid4()), 0
 
     if session_id:
@@ -210,7 +211,15 @@ async def lifespan(app: FastAPI):
     yield
     await close_db()
 
-app = FastAPI(title="Starchild Concierge API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Starchild Concierge API", version="3.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 client = OpenAI(
     api_key=OPENROUTER_API_KEY or "placeholder",
@@ -222,7 +231,8 @@ client = OpenAI(
 class ChatRequest(BaseModel):
     message: str                          # current user message
     session_id: Optional[str] = None      # omit to create new session
-    stream: bool = False
+    stream: bool = True                   # SSE streaming on by default
+
 
 class ChatResponse(BaseModel):
     reply: str
@@ -231,12 +241,25 @@ class ChatResponse(BaseModel):
     turns_remaining: int
     model: str
 
+
 class SessionInfo(BaseModel):
     session_id: str
     turn_count: int
     turns_remaining: int
     created_at: Optional[str] = None
     messages: List[dict]
+
+
+# ── SSE helpers ───────────────────────────────────────────────────────────────
+def sse_event(data: dict, event: Optional[str] = None) -> str:
+    """Format a Server-Sent Event string."""
+    lines = []
+    if event:
+        lines.append(f"event: {event}")
+    lines.append(f"data: {json.dumps(data, ensure_ascii=False)}")
+    lines.append("")
+    lines.append("")  # SSE requires double newline
+    return "\n".join(lines)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -283,7 +306,7 @@ async def get_session(session_id: str):
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat(req: ChatRequest):
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not set")
@@ -307,33 +330,60 @@ async def chat(req: ChatRequest):
 
     # 3. Call LLM
     if req.stream:
-        async def generate():
+        # ── SSE streaming response ──
+        async def generate_sse():
+            # First event: session metadata
+            yield sse_event({
+                "session_id": session_id,
+                "turn": turn_count + 1,
+                "turns_remaining": max(0, MAX_TURNS - turn_count - 1),
+                "model": MODEL,
+            }, event="session")
+
             collected = []
-            stream = client.chat.completions.create(
-                model=MODEL, messages=messages, stream=True
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    collected.append(delta)
-                    yield delta
-            # Save after stream completes
-            full_reply = "".join(collected)
-            await save_turn(session_id, req.message, full_reply)
+            try:
+                stream = client.chat.completions.create(
+                    model=MODEL, messages=messages, stream=True
+                )
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        collected.append(delta)
+                        yield sse_event({"content": delta}, event="delta")
+
+                full_reply = "".join(collected)
+                await save_turn(session_id, req.message, full_reply)
+
+                # Final event with complete reply
+                yield sse_event({
+                    "content": full_reply,
+                    "session_id": session_id,
+                    "turn": turn_count + 1,
+                    "turns_remaining": max(0, MAX_TURNS - turn_count - 1),
+                    "model": MODEL,
+                }, event="done")
+
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                yield sse_event({"error": str(e)}, event="error")
 
         return StreamingResponse(
-            generate(),
-            media_type="text/plain",
+            generate_sse(),
+            media_type="text/event-stream",
             headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",       # disable nginx buffering
                 "X-Session-Id": session_id,
-                "X-Turn": str(turn_count + 1),
             }
         )
 
+    # ── Non-streaming response ──
     resp = client.chat.completions.create(model=MODEL, messages=messages)
     reply = resp.choices[0].message.content
 
-    # 4. Persist
     await save_turn(session_id, req.message, reply)
 
     return ChatResponse(

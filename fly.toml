@@ -1,0 +1,33 @@
+app = 'starchild-concierge'
+primary_region = 'sin'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 100
+    soft_limit = 80
+
+  # Disable response buffering for SSE
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[env]
+  MODEL = "google/gemini-3.1-flash-lite-preview"
+  GITHUB_OWNER = "Starchild-ai-agent"
+  GITHUB_REPO = "starchild-concierge"
+  GITHUB_BRANCH = "main"
+  KNOWLEDGE_FILES = "welcome-knowledge-v2.md"
+  KNOWLEDGE_TTL = "300"
+  MAX_TURNS = "30"
